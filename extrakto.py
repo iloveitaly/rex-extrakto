@@ -230,6 +230,50 @@ def edit_item(item: str) -> None:
         subprocess.run([editor, item], check=False)
 
 
+def find_fzf() -> Optional[str]:
+    """Find fzf executable in PATH or standard user directories."""
+    # Ensure standard user directories are in PATH
+    user_dirs = [
+        str(Path.home() / ".local/share/mise/shims"),
+        str(Path.home() / ".local/bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ]
+    cur_path = os.environ.get("PATH", "")
+    for d in user_dirs:
+        if d not in cur_path and os.path.isdir(d):
+            cur_path = f"{d}:{cur_path}"
+    os.environ["PATH"] = cur_path
+
+    # 1. Standard PATH lookup
+    found = shutil.which("fzf")
+    if found:
+        return found
+
+    # 2. Check explicit known locations
+    direct_candidates = [
+        Path.home() / ".local/share/mise/shims/fzf",
+        Path("/opt/homebrew/bin/fzf"),
+        Path("/usr/local/bin/fzf"),
+        Path.home() / ".local/bin/fzf",
+    ]
+    for cand in direct_candidates:
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+
+    # 3. Check mise installs directly
+    mise_fzf_dir = Path.home() / ".local/share/mise/installs/fzf"
+    if mise_fzf_dir.is_dir():
+        for match in mise_fzf_dir.glob("*/bin/fzf"):
+            if match.is_file() and os.access(match, os.X_OK):
+                return str(match)
+        for match in mise_fzf_dir.glob("*/fzf"):
+            if match.is_file() and os.access(match, os.X_OK):
+                return str(match)
+
+    return None
+
+
 def run_fzf_loop(
     engine: ExtraktoEngine,
     session_id: str,
@@ -238,9 +282,18 @@ def run_fzf_loop(
     initial_grab: str = "recent",
 ) -> None:
     """Main interactive loop using fzf with dynamic reload and mode switching."""
-    fzf_bin = shutil.which("fzf")
+    fzf_bin = find_fzf()
     if not fzf_bin:
-        print("rex-extrakto error: fzf executable not found on PATH.", file=sys.stderr)
+        err_msg = (
+            "rex-extrakto error: fzf executable not found on PATH or standard directories.\n"
+            "Checked PATH, ~/.local/share/mise/shims, /opt/homebrew/bin, and /usr/local/bin.\n"
+        )
+        print(err_msg, file=sys.stderr)
+        try:
+            with open("/tmp/extrakto.err", "a") as f:
+                f.write(err_msg)
+        except Exception:
+            pass
         return
 
     filter_names = [f for f in DEFAULT_FILTERS if f in engine.filters or f in ("all", "line")]

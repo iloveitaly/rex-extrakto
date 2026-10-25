@@ -42,7 +42,8 @@ function M.setup(opts)
           options = {
             command = {
               "/bin/sh", "-c",
-              [[python3 "$1" --session "$2" --block "$3" --filter "$4" --grab "$5"; ]]
+              [[export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ]]
+                .. [[python3 "$1" --session "$2" --block "$3" --filter "$4" --grab "$5" 2>>/tmp/extrakto.err; ]]
                 .. [[rex focus -s "$2" "$3" >/dev/null 2>&1]],
               "rex-extrakto", script_path, ctx.session_id, ctx.block_id, filter, grab,
             },
