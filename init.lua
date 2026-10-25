@@ -14,6 +14,7 @@ function M.setup(opts)
   local default_filter = opts.filter or "all"
   local default_grab = opts.grab or "recent"
   local key = opts.key or "ctrl+h>f"
+  local bg_color = opts.bg_color or "#282c34"
 
   -- Main extrakto action
   rex.action{
@@ -40,12 +41,15 @@ function M.setup(opts)
         layout = rex.layout.block{
           flavor = "com.superlogical.terminal.shell",
           options = {
+            theme = {
+              background = bg_color,
+            },
             command = {
               "/bin/sh", "-c",
               [[export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ]]
-                .. [[python3 "$1" --session "$2" --block "$3" --filter "$4" --grab "$5" 2>>/tmp/extrakto.err; ]]
+                .. [[python3 "$1" --session "$2" --block "$3" --filter "$4" --grab "$5" --bg-color "$6" 2>>/tmp/extrakto.err; ]]
                 .. [[rex focus -s "$2" "$3" >/dev/null 2>&1]],
-              "rex-extrakto", script_path, ctx.session_id, ctx.block_id, filter, grab,
+              "rex-extrakto", script_path, ctx.session_id, ctx.block_id, filter, grab, bg_color,
             },
           },
         },

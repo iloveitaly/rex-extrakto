@@ -280,6 +280,8 @@ def run_fzf_loop(
     block_id: str,
     initial_filter: str = "all",
     initial_grab: str = "recent",
+    bg_color: str = "#282c34",
+    bg_highlight: str = "#3e4452",
 ) -> None:
     """Main interactive loop using fzf with dynamic reload and mode switching."""
     fzf_bin = find_fzf()
@@ -332,6 +334,7 @@ def run_fzf_loop(
             "--reverse",
             "--height=100%",
             "--border=rounded",
+            f"--color=bg:{bg_color},bg+:{bg_highlight},gutter:{bg_color},border:#4b5263",
             "--expect=enter,tab,ctrl-f,ctrl-g,ctrl-o,ctrl-e,ctrl-c,esc",
         ]
 
@@ -399,6 +402,8 @@ def main() -> None:
     parser.add_argument("--filter", default="all", help="Initial filter (all, path, url, word, line, quote)")
     parser.add_argument("--grab", default="recent", choices=["recent", "full", "window"], help="Capture area")
     parser.add_argument("--min-length", type=int, default=5, help="Minimum word length")
+    parser.add_argument("--bg-color", default="#282c34", help="Solid background color")
+    parser.add_argument("--bg-highlight", default="#3e4452", help="Solid background highlight for selected row")
 
     args = parser.parse_args()
 
@@ -409,6 +414,8 @@ def main() -> None:
         block_id=args.block,
         initial_filter=args.filter,
         initial_grab=args.grab,
+        bg_color=args.bg_color,
+        bg_highlight=args.bg_highlight,
     )
 
 
