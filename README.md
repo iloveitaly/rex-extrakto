@@ -29,7 +29,7 @@ In `~/.config/rex/init.lua`:
 -- Or configure explicitly:
 local extrakto = require("rex-extrakto")
 extrakto.setup({
-  key = "cmd+u",                     -- Default trigger key
+  key = "ctrl+h>f",                  -- Default trigger sequence: Ctrl+H, then F
   filter = "all",                    -- Initial filter: all, path, url, word, line
   grab = "recent",                   -- Initial grab: recent, full, window
   bounds = { 0.1, 0.15, 0.8, 0.7 },  -- Floating modal bounds [x, y, w, h]

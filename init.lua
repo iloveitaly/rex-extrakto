@@ -13,7 +13,7 @@ function M.setup(opts)
   local bounds = opts.bounds or { 0.1, 0.15, 0.8, 0.7 }
   local default_filter = opts.filter or "all"
   local default_grab = opts.grab or "recent"
-  local key = opts.key or "cmd+u"
+  local key = opts.key or "ctrl+h>f"
 
   -- Main extrakto action
   rex.action{
