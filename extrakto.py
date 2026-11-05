@@ -212,7 +212,8 @@ def capture_rex(session_id: str, block_id: str, grab_area: str) -> str:
 def copy_to_clipboard(text: str) -> None:
     """Copy text to system clipboard."""
     if sys.platform == "darwin":
-        subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=False)
+        env = {**os.environ, "LC_CTYPE": "UTF-8"}
+        subprocess.run(["pbcopy"], input=text.encode("utf-8"), env=env, check=False)
     elif shutil.which("wl-copy"):
         subprocess.run(["wl-copy"], input=text.encode("utf-8"), check=False)
     elif shutil.which("xclip"):
@@ -263,15 +264,27 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock.connect(self.path)
 
 
+def log_debug(msg: str) -> None:
+    if os.environ.get("REX_EXTRAKTO_DEBUG"):
+        try:
+            with open("/tmp/extrakto_debug.log", "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%X')}] {msg}\n")
+        except Exception:
+            pass
+
+
 def send_fzf_action(sock_path: str, action: str) -> bool:
     """Send an action payload to fzf over its local Unix domain socket."""
     try:
         conn = UnixHTTPConnection(sock_path)
         conn.request("POST", "/", body=action.encode("utf-8"))
         resp = conn.getresponse()
+        status = resp.status
         conn.close()
-        return resp.status == 200
-    except Exception:
+        log_debug(f"send_fzf_action: status={status}, action={action[:60]}")
+        return status == 200
+    except Exception as e:
+        log_debug(f"send_fzf_action error: {e}")
         return False
 
 
@@ -288,20 +301,23 @@ def write_filter_items(temp_dir: Path, engine: ExtraktoEngine, captured: str, fi
 
 def build_header(cur_filter: str, cur_grab: str) -> str:
     return (
-        f"enter:copy | tab:insert | →/ctrl-f:filter [{cur_filter}] | "
-        f"ctrl-g:grab [{cur_grab}] | ctrl-o:open | ctrl-e:edit | esc:cancel"
+        f"enter:copy | tab:insert | ←/→/ctrl-f:filter [{cur_filter}] | "
+        f"ctrl+←/→/ctrl-g:grab [{cur_grab}] | ctrl-o:open | ctrl-e:edit | esc:cancel"
     )
 
 
 def handle_cycle_filter(state_dir: Path, step: int) -> None:
     """Cycle the active filter and update running fzf instance in-place."""
+    log_debug(f"handle_cycle_filter: step={step}")
     state_file = state_dir / "state.json"
     if not state_file.is_file():
+        log_debug("handle_cycle_filter: state_file missing")
         return
     try:
         with open(state_file, "r", encoding="utf-8") as f:
             state = json.load(f)
-    except Exception:
+    except Exception as e:
+        log_debug(f"handle_cycle_filter: json read error {e}")
         return
 
     filter_names = state["filter_names"]
@@ -313,14 +329,14 @@ def handle_cycle_filter(state_dir: Path, step: int) -> None:
     try:
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(state, f)
-    except Exception:
-        pass
+    except Exception as e:
+        log_debug(f"handle_cycle_filter: json write error {e}")
 
     item_file = state_dir / f"items_{cur_filter}.txt"
     header = build_header(cur_filter, cur_grab)
     action = (
         f"reload-sync(cat '{item_file}')+"
-        f"change-prompt(extrakto [{cur_filter}] > )+"
+        f"change-prompt(extrakto [{cur_filter} | {cur_grab}] > )+"
         f"change-header({header})"
     )
     send_fzf_action(state["sock_path"], action)
@@ -328,13 +344,16 @@ def handle_cycle_filter(state_dir: Path, step: int) -> None:
 
 def handle_cycle_grab(state_dir: Path, step: int) -> None:
     """Cycle the grab area, re-extract items from Rex, and update fzf in-place."""
+    log_debug(f"handle_cycle_grab: step={step}")
     state_file = state_dir / "state.json"
     if not state_file.is_file():
+        log_debug("handle_cycle_grab: state_file missing")
         return
     try:
         with open(state_file, "r", encoding="utf-8") as f:
             state = json.load(f)
-    except Exception:
+    except Exception as e:
+        log_debug(f"handle_cycle_grab: json read error {e}")
         return
 
     grab_areas = state["grab_areas"]
@@ -342,6 +361,7 @@ def handle_cycle_grab(state_dir: Path, step: int) -> None:
     state["cur_grab_idx"] = cur_grab_idx
     cur_grab = grab_areas[cur_grab_idx]
     cur_filter = state["filter_names"][state["cur_filter_idx"]]
+    log_debug(f"handle_cycle_grab: new grab={cur_grab}")
 
     # Re-capture from Rex
     captured = capture_rex(state["session_id"], state["block_id"], cur_grab)
@@ -351,13 +371,14 @@ def handle_cycle_grab(state_dir: Path, step: int) -> None:
     try:
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(state, f)
-    except Exception:
-        pass
+    except Exception as e:
+        log_debug(f"handle_cycle_grab: json write error {e}")
 
     item_file = state_dir / f"items_{cur_filter}.txt"
     header = build_header(cur_filter, cur_grab)
     action = (
         f"reload-sync(cat '{item_file}')+"
+        f"change-prompt(extrakto [{cur_filter} | {cur_grab}] > )+"
         f"change-header({header})"
     )
     send_fzf_action(state["sock_path"], action)
@@ -423,7 +444,8 @@ def run_fzf_loop(
 
     next_filter_cmd = f'{py_exec} "{script_path}" --state-dir "{temp_dir_str}" --cycle-filter 1'
     prev_filter_cmd = f'{py_exec} "{script_path}" --state-dir "{temp_dir_str}" --cycle-filter -1'
-    cycle_grab_cmd = f'{py_exec} "{script_path}" --state-dir "{temp_dir_str}" --cycle-grab 1'
+    next_grab_cmd = f'{py_exec} "{script_path}" --state-dir "{temp_dir_str}" --cycle-grab 1'
+    prev_grab_cmd = f'{py_exec} "{script_path}" --state-dir "{temp_dir_str}" --cycle-grab -1'
 
     fzf_cmd = [
         fzf_bin,
@@ -431,15 +453,17 @@ def run_fzf_loop(
         "--multi",
         "--print-query",
         f"--header={header}",
-        f"--prompt=extrakto [{cur_filter}] > ",
+        f"--prompt=extrakto [{cur_filter} | {cur_grab}] > ",
         "--reverse",
         "--height=100%",
-        "--border=rounded",
-        f"--color=bg:{bg_color},bg+:{bg_highlight},gutter:{bg_color},border:#4b5263",
+        "--no-border",
+        f"--color=bg:{bg_color},bg+:{bg_highlight},gutter:{bg_color}",
         f"--bind=right:execute-silent({next_filter_cmd})",
         f"--bind=ctrl-f:execute-silent({next_filter_cmd})",
         f"--bind=left:execute-silent({prev_filter_cmd})",
-        f"--bind=ctrl-g:execute-silent({cycle_grab_cmd})",
+        f"--bind=ctrl-right:execute-silent({next_grab_cmd})",
+        f"--bind=ctrl-left:execute-silent({prev_grab_cmd})",
+        f"--bind=ctrl-g:execute-silent({next_grab_cmd})",
         "--expect=enter,tab,ctrl-o,ctrl-e,ctrl-c,esc",
     ]
 
@@ -503,6 +527,7 @@ def main() -> None:
 
     # Fast-path handlers for keybindings inside running fzf
     if args.state_dir:
+        log_debug(f"IPC main: cycle_filter={args.cycle_filter}, cycle_grab={args.cycle_grab}")
         state_dir = Path(args.state_dir)
         if args.cycle_filter != 0:
             handle_cycle_filter(state_dir, args.cycle_filter)
@@ -510,6 +535,8 @@ def main() -> None:
         if args.cycle_grab != 0:
             handle_cycle_grab(state_dir, args.cycle_grab)
             return
+
+    log_debug(f"Starting fzf loop: session={args.session}, block={args.block}, filter={args.filter}, grab={args.grab}")
 
     engine = ExtraktoEngine(min_length=args.min_length)
     run_fzf_loop(

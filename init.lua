@@ -3,13 +3,22 @@
 
 local M = {}
 
--- Resolve path to extrakto.py beside this file
-local plugin_dir = (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config"))
-  .. "/rex/plugins/rex-extrakto"
-local script_path = plugin_dir .. "/extrakto.py"
+local function resolve_script_path(custom_path)
+  if custom_path then
+    return custom_path .. "/extrakto.py"
+  end
+  local src = debug.getinfo(1, "S").source:gsub("^@", "")
+  if src:find("[/\\]") then
+    local dir = src:match("(.*)[/\\]")
+    return dir .. "/extrakto.py"
+  end
+  local config_home = os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")
+  return config_home .. "/rex/plugins/rex-extrakto/extrakto.py"
+end
 
 function M.setup(opts)
   opts = opts or {}
+  local script_path = resolve_script_path(opts.path)
   local bounds = opts.bounds or { 0.1, 0.15, 0.8, 0.7 }
   local default_filter = opts.filter or "all"
   local default_grab = opts.grab or "recent"

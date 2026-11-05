@@ -8,7 +8,7 @@ Extract URLs, file paths, words, quotes, Git hashes, IP addresses, and lines fro
 
 - **Floating Popup Layer:** Uses Rex's native `rex.session.new_layer` to overlay an interactive `fzf` window directly over your active pane.
 - **Dynamic Filter Switching (`ctrl-f`):** Cycle through `all`, `path`, `url`, `word`, `line`, `quote` without leaving the prompt.
-- **Dynamic Grab Area Switching (`ctrl-g`):** Toggle between `recent` (last 120 lines), `full` (entire scrollback), and `window` (all terminal panes in current window).
+- **Dynamic Grab Area Switching (`ctrl+←` / `ctrl+→` / `ctrl-g`):** Toggle between `recent` (last 120 lines), `full` (entire scrollback), and `window` (all terminal panes in current window).
 - **Multi-Selection:** Select multiple items with `Tab` / `Shift-Tab`.
 - **Action Shortcuts:**
   - `Enter`: Copy selection to macOS clipboard (`pbcopy`).
@@ -20,7 +20,38 @@ Extract URLs, file paths, words, quotes, Git hashes, IP addresses, and lines fro
 
 ## Installation
 
-Cloned or placed into `~/.config/rex/plugins/rex-extrakto`.
+### Using Amber (Rex Plugin Manager)
+
+Add to your `~/.config/rex/init.lua`:
+
+```lua
+amber.setup({
+  plugins = {
+    {
+      "iloveitaly/rex-extrakto",
+      opts = {
+        key = "ctrl+h>f",                 -- Default trigger: Ctrl+H, then F
+        filter = "all",                   -- Initial filter: all, path, url, word, line
+        grab = "recent",                  -- Initial grab: recent, full, window
+        bounds = { 0.1, 0.15, 0.8, 0.7 }, -- Floating modal bounds [x, y, w, h]
+      },
+    },
+  },
+})
+```
+
+Then install and reload:
+```sh
+rex config reload && rex do amber_install && rex config reload
+```
+
+### Manual Installation
+
+Clone into `~/.config/rex/plugins/rex-extrakto`:
+
+```sh
+git clone https://github.com/iloveitaly/rex-extrakto.git ~/.config/rex/plugins/rex-extrakto
+```
 
 In `~/.config/rex/init.lua`:
 

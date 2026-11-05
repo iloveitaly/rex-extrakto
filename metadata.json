@@ -1,0 +1,12 @@
+{
+  "description": "An idiomatic Rex plugin for fast, fuzzy terminal text extraction and copying",
+  "homepage": "https://github.com/iloveitaly/rex-extrakto",
+  "keywords": [
+    "rex",
+    "rex-plugin",
+    "fzf",
+    "extrakto",
+    "terminal",
+    "text-extractor"
+  ]
+}
