@@ -8,14 +8,32 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import http.client
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+T_START = time.perf_counter()
+
+
+def log_timing(msg: str) -> None:
+    elapsed = (time.perf_counter() - T_START) * 1000
+    try:
+        with open("/tmp/extrakto_timing.log", "a") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] [{elapsed:7.2f}ms] {msg}\n")
+    except Exception:
+        pass
+
+
+log_timing("extrakto.py module loaded")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -231,47 +249,118 @@ def edit_item(item: str) -> None:
 
 
 def find_fzf() -> Optional[str]:
-    """Find fzf executable in PATH or standard user directories."""
-    # Ensure standard user directories are in PATH
-    user_dirs = [
-        str(Path.home() / ".local/share/mise/shims"),
-        str(Path.home() / ".local/bin"),
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-    ]
-    cur_path = os.environ.get("PATH", "")
-    for d in user_dirs:
-        if d not in cur_path and os.path.isdir(d):
-            cur_path = f"{d}:{cur_path}"
-    os.environ["PATH"] = cur_path
+    """Find fzf executable in PATH."""
+    return shutil.which("fzf")
 
-    # 1. Standard PATH lookup
-    found = shutil.which("fzf")
-    if found:
-        return found
 
-    # 2. Check explicit known locations
-    direct_candidates = [
-        Path.home() / ".local/share/mise/shims/fzf",
-        Path("/opt/homebrew/bin/fzf"),
-        Path("/usr/local/bin/fzf"),
-        Path.home() / ".local/bin/fzf",
-    ]
-    for cand in direct_candidates:
-        if cand.is_file() and os.access(cand, os.X_OK):
-            return str(cand)
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, path: str):
+        super().__init__("localhost")
+        self.path = path
 
-    # 3. Check mise installs directly
-    mise_fzf_dir = Path.home() / ".local/share/mise/installs/fzf"
-    if mise_fzf_dir.is_dir():
-        for match in mise_fzf_dir.glob("*/bin/fzf"):
-            if match.is_file() and os.access(match, os.X_OK):
-                return str(match)
-        for match in mise_fzf_dir.glob("*/fzf"):
-            if match.is_file() and os.access(match, os.X_OK):
-                return str(match)
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(self.path)
 
-    return None
+
+def send_fzf_action(sock_path: str, action: str) -> bool:
+    """Send an action payload to fzf over its local Unix domain socket."""
+    try:
+        conn = UnixHTTPConnection(sock_path)
+        conn.request("POST", "/", body=action.encode("utf-8"))
+        resp = conn.getresponse()
+        conn.close()
+        return resp.status == 200
+    except Exception:
+        return False
+
+
+def write_filter_items(temp_dir: Path, engine: ExtraktoEngine, captured: str, filter_names: List[str]) -> None:
+    """Pre-extract and cache items for all filters into disk files."""
+    for name in filter_names:
+        items = engine.extract(captured, name)
+        if not items:
+            items = ["(no matches found)"]
+        item_file = temp_dir / f"items_{name}.txt"
+        with open(item_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(items) + "\n")
+
+
+def build_header(cur_filter: str, cur_grab: str) -> str:
+    return (
+        f"enter:copy | tab:insert | →/ctrl-f:filter [{cur_filter}] | "
+        f"ctrl-g:grab [{cur_grab}] | ctrl-o:open | ctrl-e:edit | esc:cancel"
+    )
+
+
+def handle_cycle_filter(state_dir: Path, step: int) -> None:
+    """Cycle the active filter and update running fzf instance in-place."""
+    state_file = state_dir / "state.json"
+    if not state_file.is_file():
+        return
+    try:
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception:
+        return
+
+    filter_names = state["filter_names"]
+    cur_idx = (state["cur_filter_idx"] + step) % len(filter_names)
+    state["cur_filter_idx"] = cur_idx
+    cur_filter = filter_names[cur_idx]
+    cur_grab = state["grab_areas"][state["cur_grab_idx"]]
+
+    try:
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+    item_file = state_dir / f"items_{cur_filter}.txt"
+    header = build_header(cur_filter, cur_grab)
+    action = (
+        f"reload-sync(cat '{item_file}')+"
+        f"change-prompt(extrakto [{cur_filter}] > )+"
+        f"change-header({header})"
+    )
+    send_fzf_action(state["sock_path"], action)
+
+
+def handle_cycle_grab(state_dir: Path, step: int) -> None:
+    """Cycle the grab area, re-extract items from Rex, and update fzf in-place."""
+    state_file = state_dir / "state.json"
+    if not state_file.is_file():
+        return
+    try:
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception:
+        return
+
+    grab_areas = state["grab_areas"]
+    cur_grab_idx = (state["cur_grab_idx"] + step) % len(grab_areas)
+    state["cur_grab_idx"] = cur_grab_idx
+    cur_grab = grab_areas[cur_grab_idx]
+    cur_filter = state["filter_names"][state["cur_filter_idx"]]
+
+    # Re-capture from Rex
+    captured = capture_rex(state["session_id"], state["block_id"], cur_grab)
+    engine = ExtraktoEngine(min_length=state.get("min_length", 5))
+    write_filter_items(state_dir, engine, captured, state["filter_names"])
+
+    try:
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+    item_file = state_dir / f"items_{cur_filter}.txt"
+    header = build_header(cur_filter, cur_grab)
+    action = (
+        f"reload-sync(cat '{item_file}')+"
+        f"change-header({header})"
+    )
+    send_fzf_action(state["sock_path"], action)
 
 
 def run_fzf_loop(
@@ -282,20 +371,15 @@ def run_fzf_loop(
     initial_grab: str = "recent",
     bg_color: str = "#282c34",
     bg_highlight: str = "#3e4452",
+    min_length: int = 5,
 ) -> None:
-    """Main interactive loop using fzf with dynamic reload and mode switching."""
+    """Interactive selector using a single persistent fzf instance with in-place reloading."""
     fzf_bin = find_fzf()
     if not fzf_bin:
-        err_msg = (
-            "rex-extrakto error: fzf executable not found on PATH or standard directories.\n"
-            "Checked PATH, ~/.local/share/mise/shims, /opt/homebrew/bin, and /usr/local/bin.\n"
+        print(
+            f"rex-extrakto error: fzf executable not found on PATH ({os.environ.get('PATH', '')}).",
+            file=sys.stderr,
         )
-        print(err_msg, file=sys.stderr)
-        try:
-            with open("/tmp/extrakto.err", "a") as f:
-                f.write(err_msg)
-        except Exception:
-            pass
         return
 
     filter_names = [f for f in DEFAULT_FILTERS if f in engine.filters or f in ("all", "line")]
@@ -305,94 +389,99 @@ def run_fzf_loop(
     cur_filter_idx = filter_names.index(initial_filter) if initial_filter in filter_names else 0
     cur_grab_idx = GRAB_AREAS.index(initial_grab) if initial_grab in GRAB_AREAS else 0
 
-    query = ""
+    temp_dir_str = tempfile.mkdtemp(prefix="rex-extrakto-")
+    temp_dir = Path(temp_dir_str)
+    sock_path = str(temp_dir / "fzf.sock")
+    state_file = temp_dir / "state.json"
 
-    while True:
-        cur_filter = filter_names[cur_filter_idx]
-        cur_grab = GRAB_AREAS[cur_grab_idx]
+    # Pre-extract items for initial grab area
+    cur_grab = GRAB_AREAS[cur_grab_idx]
+    captured = capture_rex(session_id, block_id, cur_grab)
+    write_filter_items(temp_dir, engine, captured, filter_names)
 
-        # 1. Capture text
-        captured = capture_rex(session_id, block_id, cur_grab)
-        items = engine.extract(captured, cur_filter)
+    state = {
+        "session_id": session_id,
+        "block_id": block_id,
+        "filter_names": filter_names,
+        "cur_filter_idx": cur_filter_idx,
+        "grab_areas": GRAB_AREAS,
+        "cur_grab_idx": cur_grab_idx,
+        "temp_dir": temp_dir_str,
+        "sock_path": sock_path,
+        "min_length": min_length,
+        "bg_color": bg_color,
+        "bg_highlight": bg_highlight,
+    }
+    with open(state_file, "w", encoding="utf-8") as f:
+        json.dump(state, f)
 
-        if not items:
-            items = ["(no matches found)"]
+    cur_filter = filter_names[cur_filter_idx]
+    header = build_header(cur_filter, cur_grab)
 
-        # 2. Build header
-        header = (
-            f"enter:copy | tab:insert | ctrl-f:filter [{cur_filter}] | "
-            f"ctrl-g:grab [{cur_grab}] | ctrl-o:open | ctrl-e:edit | esc:cancel"
-        )
+    script_path = str(Path(__file__).resolve())
+    py_exec = sys.executable
 
-        fzf_cmd = [
-            fzf_bin,
-            "--multi",
-            "--print-query",
-            f"--query={query}",
-            f"--header={header}",
-            f"--prompt=extrakto [{cur_filter}] > ",
-            "--reverse",
-            "--height=100%",
-            "--border=rounded",
-            f"--color=bg:{bg_color},bg+:{bg_highlight},gutter:{bg_color},border:#4b5263",
-            "--expect=enter,tab,ctrl-f,ctrl-g,ctrl-o,ctrl-e,ctrl-c,esc",
-        ]
+    next_filter_cmd = f'{py_exec} "{script_path}" --state-dir "{temp_dir_str}" --cycle-filter 1'
+    prev_filter_cmd = f'{py_exec} "{script_path}" --state-dir "{temp_dir_str}" --cycle-filter -1'
+    cycle_grab_cmd = f'{py_exec} "{script_path}" --state-dir "{temp_dir_str}" --cycle-grab 1'
 
-        proc = subprocess.Popen(
-            fzf_cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
-        )
+    fzf_cmd = [
+        fzf_bin,
+        f"--listen={sock_path}",
+        "--multi",
+        "--print-query",
+        f"--header={header}",
+        f"--prompt=extrakto [{cur_filter}] > ",
+        "--reverse",
+        "--height=100%",
+        "--border=rounded",
+        f"--color=bg:{bg_color},bg+:{bg_highlight},gutter:{bg_color},border:#4b5263",
+        f"--bind=right:execute-silent({next_filter_cmd})",
+        f"--bind=ctrl-f:execute-silent({next_filter_cmd})",
+        f"--bind=left:execute-silent({prev_filter_cmd})",
+        f"--bind=ctrl-g:execute-silent({cycle_grab_cmd})",
+        "--expect=enter,tab,ctrl-o,ctrl-e,ctrl-c,esc",
+    ]
 
-        stdout, _ = proc.communicate(input="\n".join(items))
-        lines = stdout.splitlines()
+    initial_item_file = temp_dir / f"items_{cur_filter}.txt"
+    initial_items = ""
+    if initial_item_file.is_file():
+        with open(initial_item_file, "r", encoding="utf-8") as f:
+            initial_items = f.read()
 
-        if len(lines) < 2:
-            break
+    proc = subprocess.Popen(
+        fzf_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
 
-        query = lines[0]
-        key = lines[1]
-        selections = [line for line in lines[2:] if line and line != "(no matches found)"]
+    stdout, _ = proc.communicate(input=initial_items)
+    lines = stdout.splitlines()
 
-        if key in ("ctrl-c", "esc") or not key and not selections:
-            break
+    query = lines[0] if len(lines) > 0 else ""
+    key = lines[1] if len(lines) > 1 else ""
+    selections = [line for line in lines[2:] if line and line != "(no matches found)"]
 
-        if key == "ctrl-f":
-            cur_filter_idx = (cur_filter_idx + 1) % len(filter_names)
-            continue
+    if not selections and query.strip() and key not in ("ctrl-c", "esc"):
+        selections = [query.strip()]
 
-        if key == "ctrl-g":
-            cur_grab_idx = (cur_grab_idx + 1) % len(GRAB_AREAS)
-            continue
+    joined_text = "\n".join(selections)
 
-        if not selections:
-            # If user pressed action key without selecting from list, use current query
-            if query.strip():
-                selections = [query.strip()]
-            else:
-                break
+    if key == "enter" and joined_text:
+        copy_to_clipboard(joined_text)
+    elif key == "tab" and joined_text:
+        insert_text = " ".join(selections)
+        send_to_rex(session_id, block_id, insert_text)
+    elif key == "ctrl-o" and selections:
+        for item in selections:
+            open_item(item)
+    elif key == "ctrl-e" and selections:
+        for item in selections:
+            edit_item(item)
 
-        joined_text = "\n".join(selections)
-
-        if key == "enter":
-            copy_to_clipboard(joined_text)
-            break
-        elif key == "tab":
-            # Space-joined text when inserting into terminal prompt
-            insert_text = " ".join(selections)
-            send_to_rex(session_id, block_id, insert_text)
-            break
-        elif key == "ctrl-o":
-            for item in selections:
-                open_item(item)
-            break
-        elif key == "ctrl-e":
-            for item in selections:
-                edit_item(item)
-            break
-        else:
-            break
+    # Cleanup temp directory
+    shutil.rmtree(temp_dir_str, ignore_errors=True)
 
 
 def main() -> None:
@@ -405,7 +494,22 @@ def main() -> None:
     parser.add_argument("--bg-color", default="#282c34", help="Solid background color")
     parser.add_argument("--bg-highlight", default="#3e4452", help="Solid background highlight for selected row")
 
+    # Fast IPC actions for dynamic in-place fzf updates
+    parser.add_argument("--state-dir", default="", help="Internal IPC state directory for fzf socket communication")
+    parser.add_argument("--cycle-filter", type=int, default=0, help="Cycle filter by step (+1 or -1) without reload")
+    parser.add_argument("--cycle-grab", type=int, default=0, help="Cycle grab area by step (+1) without reload")
+
     args = parser.parse_args()
+
+    # Fast-path handlers for keybindings inside running fzf
+    if args.state_dir:
+        state_dir = Path(args.state_dir)
+        if args.cycle_filter != 0:
+            handle_cycle_filter(state_dir, args.cycle_filter)
+            return
+        if args.cycle_grab != 0:
+            handle_cycle_grab(state_dir, args.cycle_grab)
+            return
 
     engine = ExtraktoEngine(min_length=args.min_length)
     run_fzf_loop(
@@ -416,6 +520,7 @@ def main() -> None:
         initial_grab=args.grab,
         bg_color=args.bg_color,
         bg_highlight=args.bg_highlight,
+        min_length=args.min_length,
     )
 
 

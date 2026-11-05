@@ -14,6 +14,7 @@ function M.setup(opts)
   local default_filter = opts.filter or "all"
   local default_grab = opts.grab or "recent"
   local key = opts.key or "ctrl+h>f"
+  local url_key = opts.url_key or "ctrl+h>u"
   local bg_color = opts.bg_color or "#282c34"
 
   -- Main extrakto action
@@ -41,13 +42,14 @@ function M.setup(opts)
         layout = rex.layout.block{
           flavor = "com.superlogical.terminal.shell",
           options = {
+            shell = "zsh",
             theme = {
               background = bg_color,
             },
+            login = true,
             command = {
-              "/bin/sh", "-c",
-              [[export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; ]]
-                .. [[python3 "$1" --session "$2" --block "$3" --filter "$4" --grab "$5" --bg-color "$6" 2>>/tmp/extrakto.err; ]]
+              "zsh", "-l", "-c",
+              [[python3 "$1" --session "$2" --block "$3" --filter "$4" --grab "$5" --bg-color "$6" 2>>/tmp/extrakto.err; ]]
                 .. [[rex focus -s "$2" "$3" >/dev/null 2>&1]],
               "rex-extrakto", script_path, ctx.session_id, ctx.block_id, filter, grab, bg_color,
             },
@@ -110,6 +112,9 @@ function M.setup(opts)
 
   if key and key ~= false then
     rex.bind(key, "extrakto")
+  end
+  if url_key and url_key ~= false then
+    rex.bind(url_key, "extrakto_url")
   end
 end
 
