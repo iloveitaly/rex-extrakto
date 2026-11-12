@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -37,7 +38,7 @@ log_timing("extrakto.py module loaded")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-DEFAULT_FILTERS = ["all", "path", "url", "word", "line", "quote"]
+DEFAULT_FILTERS = ["all", "path", "url", "osc8", "word", "line", "quote"]
 GRAB_AREAS = ["recent", "full", "window"]
 
 
@@ -132,7 +133,50 @@ class ExtraktoEngine:
             )
             self.filter_order.append(section)
 
-    def extract(self, text: str, mode: str) -> List[str]:
+    def extract_osc8(self, vt_text: str) -> List[str]:
+        ansi_strip = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+        osc8_pair = re.compile(
+            r"\x1b\]8;(?P<params>[^;]*);(?P<url>[^\x1b\x07]+)(?:\x1b\\|\x07)(?P<text>.*?)\x1b\]8;;(?:\x1b\\|\x07)",
+            re.DOTALL,
+        )
+
+        matches = list(osc8_pair.finditer(vt_text))
+        raw_pairs: List[Tuple[str, str]] = []
+        seen = set()
+
+        for m in reversed(matches):
+            url = m.group("url").strip()
+            raw_text = m.group("text")
+            clean_text = ansi_strip.sub("", raw_text).strip()
+            clean_text = re.sub(r"\s+", " ", clean_text)
+            if not clean_text:
+                clean_text = url
+
+            key = (clean_text, url)
+            if key in seen:
+                continue
+            seen.add(key)
+            raw_pairs.append((clean_text, url))
+
+        if not raw_pairs:
+            return []
+
+        diff_texts = [t for t, u in raw_pairs if t != u]
+        max_len = min(max(len(t) for t in diff_texts), 50) if diff_texts else 0
+
+        items: List[str] = []
+        for text, url in raw_pairs:
+            if text == url:
+                items.append(f"\033[2m{url}\033[0m")
+            else:
+                items.append(f"\033[1;36m{text:<{max_len}}\033[0m  \t\033[2m{url}\033[0m")
+
+        return items
+
+    def extract(self, text: str, mode: str, vt_text: str = "") -> List[str]:
+        if mode == "osc8":
+            return self.extract_osc8(vt_text or text)
+
         # Process lines in reverse order so recent items appear first
         lines = text.splitlines()
         rev_text = "\n".join(reversed(lines))
@@ -171,8 +215,9 @@ class ExtraktoEngine:
         return deduped
 
 
-def capture_rex(session_id: str, block_id: str, grab_area: str) -> str:
+def capture_rex(session_id: str, block_id: str, grab_area: str, format: str = "text") -> str:
     """Capture terminal output from Rex CLI."""
+    fmt_args = ["--format", format] if format != "text" else []
     if grab_area == "window":
         # Capture all placed blocks in the session
         cmd = ["rex", "block", "ls", "-s", session_id, "--json"]
@@ -185,7 +230,7 @@ def capture_rex(session_id: str, block_id: str, grab_area: str) -> str:
                     b_id = b.get("block_id")
                     if b.get("creator_name") == "com.superlogical.terminal" and b_id:
                         cap = subprocess.run(
-                            ["rex", "capture", "-s", session_id, "-b", b_id, "--trim"],
+                            ["rex", "capture", "-s", session_id, "-b", b_id, "--trim", *fmt_args],
                             capture_output=True,
                             text=True,
                         )
@@ -197,7 +242,7 @@ def capture_rex(session_id: str, block_id: str, grab_area: str) -> str:
             return "\n".join(all_text)
 
     # Default to target block capture
-    cmd = ["rex", "capture", "-s", session_id, "-b", block_id, "--trim"]
+    cmd = ["rex", "capture", "-s", session_id, "-b", block_id, "--trim", *fmt_args]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     out = proc.stdout if proc.returncode == 0 else ""
 
@@ -207,6 +252,13 @@ def capture_rex(session_id: str, block_id: str, grab_area: str) -> str:
         return "\n".join(lines[-120:])
 
     return out
+
+
+def capture_rex_all(session_id: str, block_id: str, grab_area: str) -> Tuple[str, str]:
+    """Capture both plaintext and VT escape sequences from Rex."""
+    text = capture_rex(session_id, block_id, grab_area, format="text")
+    vt = capture_rex(session_id, block_id, grab_area, format="vt")
+    return text, vt
 
 
 def copy_to_clipboard(text: str) -> None:
@@ -226,27 +278,60 @@ def send_to_rex(session_id: str, block_id: str, text: str) -> None:
     subprocess.run(cmd, check=False)
 
 
+ANSI_STRIP_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
+def resolve_target(item: str) -> str:
+    """Extract actual link target or URL from a formatted selection row."""
+    clean = ANSI_STRIP_RE.sub("", item).strip()
+    if "\t" in clean:
+        _, target = clean.split("\t", 1)
+        return target.strip()
+    return clean
+
+
+def normalize_for_editor(target: str) -> str:
+    """Normalize file:// URL or path with fragment into path[:line] for editor."""
+    if target.startswith("file://"):
+        parsed = urllib.parse.urlparse(target)
+        path = urllib.parse.unquote(parsed.path)
+        frag = parsed.fragment
+        line_num = ""
+        if frag:
+            m = re.search(r"L?(\d+)", frag)
+            if m:
+                line_num = f":{m.group(1)}"
+        return f"{path}{line_num}"
+    return target
+
+
 def open_item(item: str) -> None:
     """Open URL or path with system opener."""
+    target = resolve_target(item)
     if sys.platform == "darwin":
-        subprocess.run(["open", item], check=False)
+        subprocess.run(["open", target], check=False)
     elif shutil.which("xdg-open"):
-        subprocess.run(["xdg-open", item], check=False)
+        cmd_target = target
+        if cmd_target.startswith("file://"):
+            parsed = urllib.parse.urlparse(cmd_target)
+            cmd_target = urllib.parse.unquote(parsed.path)
+        subprocess.run(["xdg-open", cmd_target], check=False)
 
 
 def edit_item(item: str) -> None:
     """Open path in editor or custom open hook."""
-    open_hook = Path.home() / ".config" / "mbianco" / "open-file-path.sh"
-    if open_hook.is_file() and os.access(open_hook, os.X_OK):
-        subprocess.run([str(open_hook), item], check=False)
+    target = normalize_for_editor(resolve_target(item))
+    if target.startswith(("http://", "https://")):
+        open_item(target)
         return
 
-    editor = os.environ.get("EDITOR", "vi")
-    if sys.platform == "darwin" and (editor == "vi" or not shutil.which(editor)):
-        # Fall back to open
-        subprocess.run(["open", item], check=False)
-    else:
-        subprocess.run([editor, item], check=False)
+    open_hook = Path.home() / ".config" / "mbianco" / "open-file-path.sh"
+    if open_hook.is_file() and os.access(open_hook, os.X_OK):
+        subprocess.run([str(open_hook), target], check=False)
+        return
+
+    editor = "nvim" if shutil.which("nvim") else "open"
+    subprocess.run([editor, target], check=False)
 
 
 def find_fzf() -> Optional[str]:
@@ -288,10 +373,12 @@ def send_fzf_action(sock_path: str, action: str) -> bool:
         return False
 
 
-def write_filter_items(temp_dir: Path, engine: ExtraktoEngine, captured: str, filter_names: List[str]) -> None:
+def write_filter_items(
+    temp_dir: Path, engine: ExtraktoEngine, captured: str, captured_vt: str, filter_names: List[str]
+) -> None:
     """Pre-extract and cache items for all filters into disk files."""
     for name in filter_names:
-        items = engine.extract(captured, name)
+        items = engine.extract(captured, name, vt_text=captured_vt)
         if not items:
             items = ["(no matches found)"]
         item_file = temp_dir / f"items_{name}.txt"
@@ -364,9 +451,9 @@ def handle_cycle_grab(state_dir: Path, step: int) -> None:
     log_debug(f"handle_cycle_grab: new grab={cur_grab}")
 
     # Re-capture from Rex
-    captured = capture_rex(state["session_id"], state["block_id"], cur_grab)
+    captured_text, captured_vt = capture_rex_all(state["session_id"], state["block_id"], cur_grab)
     engine = ExtraktoEngine(min_length=state.get("min_length", 5))
-    write_filter_items(state_dir, engine, captured, state["filter_names"])
+    write_filter_items(state_dir, engine, captured_text, captured_vt, state["filter_names"])
 
     try:
         with open(state_file, "w", encoding="utf-8") as f:
@@ -403,7 +490,7 @@ def run_fzf_loop(
         )
         return
 
-    filter_names = [f for f in DEFAULT_FILTERS if f in engine.filters or f in ("all", "line")]
+    filter_names = [f for f in DEFAULT_FILTERS if f in engine.filters or f in ("all", "line", "osc8")]
     if initial_filter not in filter_names:
         filter_names.insert(0, initial_filter)
 
@@ -417,8 +504,8 @@ def run_fzf_loop(
 
     # Pre-extract items for initial grab area
     cur_grab = GRAB_AREAS[cur_grab_idx]
-    captured = capture_rex(session_id, block_id, cur_grab)
-    write_filter_items(temp_dir, engine, captured, filter_names)
+    captured_text, captured_vt = capture_rex_all(session_id, block_id, cur_grab)
+    write_filter_items(temp_dir, engine, captured_text, captured_vt, filter_names)
 
     state = {
         "session_id": session_id,
@@ -451,6 +538,7 @@ def run_fzf_loop(
         fzf_bin,
         f"--listen={sock_path}",
         "--multi",
+        "--ansi",
         "--print-query",
         f"--header={header}",
         f"--prompt=extrakto [{cur_filter} | {cur_grab}] > ",
@@ -490,18 +578,19 @@ def run_fzf_loop(
     if not selections and query.strip() and key not in ("ctrl-c", "esc"):
         selections = [query.strip()]
 
-    joined_text = "\n".join(selections)
+    resolved_selections = [resolve_target(item) for item in selections]
+    joined_text = "\n".join(resolved_selections)
 
     if key == "enter" and joined_text:
         copy_to_clipboard(joined_text)
     elif key == "tab" and joined_text:
-        insert_text = " ".join(selections)
+        insert_text = " ".join(resolved_selections)
         send_to_rex(session_id, block_id, insert_text)
-    elif key == "ctrl-o" and selections:
-        for item in selections:
+    elif key == "ctrl-o" and resolved_selections:
+        for item in resolved_selections:
             open_item(item)
-    elif key == "ctrl-e" and selections:
-        for item in selections:
+    elif key == "ctrl-e" and resolved_selections:
+        for item in resolved_selections:
             edit_item(item)
 
     # Cleanup temp directory
@@ -512,7 +601,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Extrakto for Rex")
     parser.add_argument("--session", default=os.environ.get("REX_SESSION", ""), help="Target Rex session ID")
     parser.add_argument("--block", default=os.environ.get("REX_BLOCK", ""), help="Target Rex block ID")
-    parser.add_argument("--filter", default="all", help="Initial filter (all, path, url, word, line, quote)")
+    parser.add_argument("--filter", default="all", help="Initial filter (all, path, url, osc8, word, line, quote)")
     parser.add_argument("--grab", default="recent", choices=["recent", "full", "window"], help="Capture area")
     parser.add_argument("--min-length", type=int, default=5, help="Minimum word length")
     parser.add_argument("--bg-color", default="#282c34", help="Solid background color")

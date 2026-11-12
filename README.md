@@ -7,7 +7,8 @@ Extract URLs, file paths, words, quotes, Git hashes, IP addresses, and lines fro
 ## Features
 
 - **Floating Popup Layer:** Uses Rex's native `rex.session.new_layer` to overlay an interactive `fzf` window directly over your active pane.
-- **Dynamic Filter Switching (`ctrl-f`):** Cycle through `all`, `path`, `url`, `word`, `line`, `quote` without leaving the prompt.
+- **Dynamic Filter Switching (`ctrl-f`):** Cycle through `all`, `path`, `url`, `osc8`, `word`, `line`, `quote` without leaving the prompt.
+- **OSC 8 Hyperlinks:** Dedicated `osc8` filter extracts embedded terminal hyperlinks. Displays the visible preview text alongside the target URL; selecting, copying, opening, or editing acts directly on the target URL (with line numbers parsed for `$EDITOR`).
 - **Dynamic Grab Area Switching (`ctrl+←` / `ctrl+→` / `ctrl-g`):** Toggle between `recent` (last 120 lines), `full` (entire scrollback), and `window` (all terminal panes in current window).
 - **Multi-Selection:** Select multiple items with `Tab` / `Shift-Tab`.
 - **Action Shortcuts:**
@@ -75,7 +76,8 @@ rex config reload
 ## Available Actions
 
 * `extrakto`: Opens the extractor with default/declared settings.
-* `extrakto_url`: Opens directly filtered to URLs.
+* `extrakto_osc8`: Opens directly filtered to OSC 8 hyperlinks (default: `ctrl+h>o`).
+* `extrakto_url`: Opens directly filtered to URLs (default: `ctrl+h>u`).
 * `extrakto_path`: Opens directly filtered to file paths.
 * `extrakto_word`: Opens directly filtered to words.
 * `extrakto_line`: Opens directly filtered to lines.

@@ -24,6 +24,7 @@ function M.setup(opts)
   local default_grab = opts.grab or "recent"
   local key = opts.key or "ctrl+h>f"
   local url_key = opts.url_key or "ctrl+h>u"
+  local osc8_key = opts.osc8_key or "ctrl+h>o"
   local bg_color = opts.bg_color or "#282c34"
 
   -- Main extrakto action
@@ -87,6 +88,17 @@ function M.setup(opts)
   }
 
   rex.action{
+    name = "extrakto_osc8",
+    title = "Extrakto: Extract OSC 8 Links",
+    description = "Fuzzy search and select terminal OSC 8 hyperlinks",
+    category = "Selection",
+    keywords = "extrakto osc8 url hyperlink link preview",
+    run = function(ctx)
+      return rex.invoke("extrakto", { filter = "osc8" })
+    end,
+  }
+
+  rex.action{
     name = "extrakto_path",
     title = "Extrakto: Extract Paths",
     description = "Fuzzy search and select file paths from terminal",
@@ -124,6 +136,9 @@ function M.setup(opts)
   end
   if url_key and url_key ~= false then
     rex.bind(url_key, "extrakto_url")
+  end
+  if osc8_key and osc8_key ~= false then
+    rex.bind(osc8_key, "extrakto_osc8")
   end
 end
 
